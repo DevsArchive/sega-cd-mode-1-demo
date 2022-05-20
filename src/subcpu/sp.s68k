@@ -1,0 +1,123 @@
+; ---------------------------------------------------------------------------
+; Mode 1 Demo
+; By Devon 2022
+; ---------------------------------------------------------------------------
+; System program
+; ---------------------------------------------------------------------------
+
+	include	"megacd.i"
+
+; ---------------------------------------------------------------------------
+; Header
+; ---------------------------------------------------------------------------
+
+	CPU	68000
+	org	SPSTART
+
+Header:
+	dc.b	"MAIN       "				; Module name
+	dc.b	0					; No startup code
+	dc.w	$0100					; Version
+	dc.w	$0000					; Type
+	dc.l	$00000000				; Next module
+	dc.l	$00000000				; Module size
+	dc.l	JumpTable-Header			; Start address
+	dc.l	$00000000				; Work RAM address
+
+; ---------------------------------------------------------------------------
+; Jump table
+; ---------------------------------------------------------------------------
+
+JumpTable:
+	dc.w	Initialize-JumpTable			; Initialization
+	dc.w	Main-JumpTable				; Main
+	dc.w	MDInterrupt-JumpTable			; Mega Drive interrupt
+	dc.w	0					; User defined/End of table
+
+; ---------------------------------------------------------------------------
+; Initialize
+; ---------------------------------------------------------------------------
+
+Initialize:
+	andi.b	#$E2,MEMMODE.w				; Disable priority mode, set to 2M mode
+	rts
+
+; ---------------------------------------------------------------------------
+; Main
+; ---------------------------------------------------------------------------
+
+Main:
+	bclr	#2,INTMASK+1.w				; Disable INT2
+	bsr.w	InitPCM					; Initialize PCM
+	bset	#2,INTMASK+1.w				; Enable INT2
+
+.SendWordRAM:						; Give the Main CPU Word RAM
+	bset	#0,MEMMODE.w
+	beq.s	.SendWordRAM
+
+.WaitMain:
+	cmpi.b	#"R",MAINFLAG.w				; Is the Main CPU done with the security code?
+	bne.s	.WaitMain				; If not, branch
+	move.b	#"G",SUBFLAG.w				; Tell the Main CPU we got the memo
+
+.WaitMain2:
+	tst.b	MAINFLAG.w				; Is the Main CPU ready to send commands?
+	bne.s	.WaitMain2				; If not, branch
+	move.b	#"R",SUBFLAG.w				; Mark as ready to retrieve commands
+
+; ---------------------------------------------------------------------------
+
+CommandLoop:
+	moveq	#0,d0					; Get command ID
+	move.b	MAINFLAG.w,d0
+	beq.s	CommandLoop				; Wait if we if the ID is 0
+
+	move.b	#"B",SUBFLAG.w				; Mark as busy
+	
+.WaitMain:
+	tst.b	MAINFLAG.w				; Is the Main CPU ready to send commands again?
+	bne.s	.WaitMain				; If not, branch
+
+	add.w	d0,d0					; Go to command
+	add.w	d0,d0
+	jsr	.Commands-4(pc,d0.w)
+
+	move.b	#"R",SUBFLAG.w				; Mark as ready
+	bra.s	CommandLoop				; Loop
+
+; ---------------------------------------------------------------------------
+; Commands
+; ---------------------------------------------------------------------------
+
+.Commands:
+	bra.w	GfxRender				; Start graphics rendering
+	bra.w	CheckGfx				; Check graphics status
+
+; ---------------------------------------------------------------------------
+; Mega Drive (level 2) interrupt
+; ---------------------------------------------------------------------------
+
+MDInterrupt:
+	movem.l	d0-a6,-(sp)				; Save registers
+	bclr	#2,INTMASK+1.w				; Update PCM tracker
+	bsr.w	UpdatePCMTracker
+	bset	#2,INTMASK+1.w
+	movem.l	(sp)+,d0-a6				; Restore registers
+	rts
+	
+; ---------------------------------------------------------------------------
+; Libraries
+; ---------------------------------------------------------------------------
+
+	include	"subcpu/gfx.s68k"			; Graphics library
+	include	"subcpu/pcm.s68k"			; PCM library
+
+; ---------------------------------------------------------------------------
+; Variables
+; ---------------------------------------------------------------------------
+
+BIOSParams:
+	dc.b	$01, $FF, $00, $00			; BIOS parameters
+	dc.b	$00, $00, $00, $00
+
+; ---------------------------------------------------------------------------

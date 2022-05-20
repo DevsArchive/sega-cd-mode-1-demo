@@ -1,0 +1,192 @@
+; ---------------------------------------------------------------------------
+; Mode 1 Demo
+; By Devon 2022
+; ---------------------------------------------------------------------------
+; Graphics commands
+; ---------------------------------------------------------------------------
+
+	include	"subcpu/gfxdef.i"
+
+; -------------------------------------------------------------------------
+; Start graphics rendering
+; Based on https://www.coranac.com/tonc/text/mode7.htm
+; -------------------------------------------------------------------------
+; PARAMETERS:
+;	Cmd 0 - Camera X
+;	Cmd 1 - Camera Y
+;	Cmd 2 - Camera Z
+;	Cmd 3 - Camera angle
+; -------------------------------------------------------------------------
+
+GfxRender:
+	move.w	MAINCOM3.w,d0			; Get sine values
+	andi.w	#$1FE,d0
+	lea	SineTable+$10(pc),a0
+	move.w	-$10(a0,d0.w),d2		; sin(a)
+	move.w	$70(a0,d0.w),d3			; cos(a)
+
+	lea	WORDRAM2M+TRACE_TABLE,a0	; Trace table
+	lea	ReciprocalLUT(pc),a1		; Reciprocal LUT
+
+	move.w	#IMG_HEIGHT-1,d7
+
+.LineLoop:
+	move.w	(a1)+,d0			; lam = cam_pos_y / y
+	mulu.w	MAINCOM1.w,d0
+	swap	d0
+
+	move.w	d0,d1				; lsf = lam * sin(a)
+	muls.w	d2,d1
+	asr.l	#5,d1
+	muls.w	d3,d0				; lcf = lam * cos(a)
+	asr.l	#5,d0
+
+	move.w	#IMG_WIDTH/2,d4			; lxr = center * lcf
+	muls.w	d0,d4
+	asr.l	#8,d4
+	move.w	#IMG_FOV,d5			; lyr = fov * lsf
+	muls.w	d1,d5
+	asr.l	#8,d5
+
+	move.w	MAINCOM0.w,d6			; Start X = cam_pos_x - lxr + lyr
+	sub.w	d4,d6
+	add.w	d5,d6
+	move.w	d6,(a0)+
+
+	move.w	#IMG_WIDTH/2,d4			; lxr = center * lsf
+	muls.w	d1,d4
+	asr.l	#8,d4
+	move.w	#IMG_FOV,d5			; lyr = fov * lcf
+	muls.w	d0,d5
+	asr.l	#8,d5
+
+	move.w	MAINCOM2.w,d6			; Start Y = cam_pos_z - lxr - lyr
+	sub.w	d4,d6
+	sub.w	d5,d6
+	move.w	d6,(a0)+
+
+	move.w	d0,d4				; Delta X = lcf
+	move.w	d4,(a0)+
+	move.w	d1,d4				; Delta Y = lsf
+	move.w	d4,(a0)+
+
+	dbf	d7,.LineLoop			; Loop until all lines are set
+
+; -------------------------------------------------------------------------
+
+	move.w	#STAMP_MAP/4,STAMPMAP.w		; Set stamp map address
+	move.w	#IMG_BUFFER/4,IMGBUFFER.w	; Set image buffer address
+	
+	move.b	#%111,GFXSIZE.w			; 4096x4096 repeated map, 32x32 stamps
+	move.w	#IMG_WIDTH,IMGHSIZE.w		; Set image buffer horizontal resolution
+	move.w	#IMG_HEIGHT,IMGVSIZE.w		; Set image buffer vertical resolution
+	move.w	#IMG_TILE_H-1,IMGVSZTILE.w
+	move.w	#0,IMGOFFSET.w			; Set image buffer offset
+
+	move.w	#TRACE_TABLE/4,TRACETBL.w	; Set trace table address and start rendering
+	rts
+
+; -------------------------------------------------------------------------
+
+ReciprocalLUT:
+	dc.w	$8000, $5555, $4000, $3333, $2AAB, $2492, $2000, $1C72
+	dc.w	$199A, $1746, $1555, $13B1, $1249, $1111, $1000, $0F0F
+	dc.w	$0E39, $0D79, $0CCD, $0C31, $0BA3, $0B21, $0AAB, $0A3D
+	dc.w	$09D9, $097B, $0925, $08D4, $0889, $0842, $0800, $07C2
+	dc.w	$0788, $0750, $071C, $06EB, $06BD, $0690, $0666, $063E
+	dc.w	$0618, $05F4, $05D1, $05B0, $0591, $0572, $0555, $0539
+	dc.w	$051F, $0505, $04EC, $04D5, $04BE, $04A8, $0492, $047E
+	dc.w	$046A, $0457, $0444, $0432, $0421, $0410, $0400, $03F0
+	dc.w	$03E1, $03D2, $03C4, $03B6, $03A8, $039B, $038E, $0382
+	dc.w	$0376, $036A, $035E, $0353, $0348, $033E, $0333, $0329
+	dc.w	$031F, $0316, $030C, $0303, $02FA, $02F1, $02E9, $02E0
+	dc.w	$02D8, $02D0, $02C8, $02C1, $02B9, $02B2, $02AB, $02A4
+	dc.w	$029D, $0296, $028F, $0289, $0283, $027C, $0276, $0270
+	dc.w	$026A, $0264, $025F, $0259, $0254, $024E, $0249, $0244
+	dc.w	$023F, $023A, $0235, $0230, $022B, $0227, $0222, $021E
+	dc.w	$0219, $0215, $0211, $020C, $0208, $0204, $0200, $01FC
+	dc.w	$01F8, $01F4, $01F0, $01ED, $01E9, $01E5, $01E2, $01DE
+	dc.w	$01DB, $01D7, $01D4, $01D1, $01CE, $01CA, $01C7, $01C4
+	dc.w	$01C1, $01BE, $01BB, $01B8, $01B5, $01B2, $01AF, $01AC
+	dc.w	$01AA, $01A7, $01A4, $01A1, $019F, $019C, $019A, $0197
+	dc.w	$0195, $0192, $0190, $018D, $018B, $0188, $0186, $0184
+	dc.w	$0182, $017F, $017D, $017B, $0179, $0176, $0174, $0172
+	dc.w	$0170, $016E, $016C, $016A, $0168, $0166, $0164, $0162
+	dc.w	$0160, $015E, $015D, $015B, $0159, $0157, $0155, $0154
+	dc.w	$0152, $0150, $014E, $014D, $014B, $0149, $0148, $0146
+	dc.w	$0144, $0143, $0141, $0140, $013E, $013D, $013B, $013A
+	dc.w	$0138, $0137, $0135, $0134, $0132, $0131, $012F, $012E
+	dc.w	$012D, $012B, $012A, $0129, $0127, $0126, $0125, $0123
+	dc.w	$0122, $0121, $011F, $011E, $011D, $011C, $011A, $0119
+	dc.w	$0118, $0117, $0116, $0115, $0113, $0112, $0111, $0110
+	dc.w	$010F, $010E, $010D, $010B, $010A, $0109, $0108, $0107
+	dc.w	$0106, $0105, $0104, $0103, $0102, $0101, $0100, $00FF
+
+; -------------------------------------------------------------------------
+
+SineTable:
+	dc.w	$0000, $0006, $000C, $0012, $0019, $001F, $0025, $002B
+	dc.w	$0031, $0038, $003E, $0044, $004A, $0050, $0056, $005C
+	dc.w	$0061, $0067, $006D, $0073, $0078, $007E, $0083, $0088
+	dc.w	$008E, $0093, $0098, $009D, $00A2, $00A7, $00AB, $00B0
+	dc.w	$00B5, $00B9, $00BD, $00C1, $00C5, $00C9, $00CD, $00D1
+	dc.w	$00D4, $00D8, $00DB, $00DE, $00E1, $00E4, $00E7, $00EA
+	dc.w	$00EC, $00EE, $00F1, $00F3, $00F4, $00F6, $00F8, $00F9
+	dc.w	$00FB, $00FC, $00FD, $00FE, $00FE, $00FF, $00FF, $00FF
+	dc.w	$0100, $00FF, $00FF, $00FF, $00FE, $00FE, $00FD, $00FC
+	dc.w	$00FB, $00F9, $00F8, $00F6, $00F4, $00F3, $00F1, $00EE
+	dc.w	$00EC, $00EA, $00E7, $00E4, $00E1, $00DE, $00DB, $00D8
+	dc.w	$00D4, $00D1, $00CD, $00C9, $00C5, $00C1, $00BD, $00B9
+	dc.w	$00B5, $00B0, $00AB, $00A7, $00A2, $009D, $0098, $0093
+	dc.w	$008E, $0088, $0083, $007E, $0078, $0073, $006D, $0067
+	dc.w	$0061, $005C, $0056, $0050, $004A, $0044, $003E, $0038
+	dc.w	$0031, $002B, $0025, $001F, $0019, $0012, $000C, $0006
+	dc.w	$0000, $FFFA, $FFF4, $FFEE, $FFE7, $FFE1, $FFDB, $FFD5
+	dc.w	$FFCF, $FFC8, $FFC2, $FFBC, $FFB6, $FFB0, $FFAA, $FFA4
+	dc.w	$FF9F, $FF99, $FF93, $FF8B, $FF88, $FF82, $FF7D, $FF78
+	dc.w	$FF72, $FF6D, $FF68, $FF63, $FF5E, $FF59, $FF55, $FF50
+	dc.w	$FF4B, $FF47, $FF43, $FF3F, $FF3B, $FF37, $FF33, $FF2F
+	dc.w	$FF2C, $FF28, $FF25, $FF22, $FF1F, $FF1C, $FF19, $FF16
+	dc.w	$FF14, $FF12, $FF0F, $FF0D, $FF0C, $FF0A, $FF08, $FF07
+	dc.w	$FF05, $FF04, $FF03, $FF02, $FF02, $FF01, $FF01, $FF01
+	dc.w	$FF00, $FF01, $FF01, $FF01, $FF02, $FF02, $FF03, $FF04
+	dc.w	$FF05, $FF07, $FF08, $FF0A, $FF0C, $FF0D, $FF0F, $FF12
+	dc.w	$FF14, $FF16, $FF19, $FF1C, $FF1F, $FF22, $FF25, $FF28
+	dc.w	$FF2C, $FF2F, $FF33, $FF37, $FF3B, $FF3F, $FF43, $FF47
+	dc.w	$FF4B, $FF50, $FF55, $FF59, $FF5E, $FF63, $FF68, $FF6D
+	dc.w	$FF72, $FF78, $FF7D, $FF82, $FF88, $FF8B, $FF93, $FF99
+	dc.w	$FF9F, $FFA4, $FFAA, $FFB0, $FFB6, $FFBC, $FFC2, $FFC8
+	dc.w	$FFCF, $FFD5, $FFDB, $FFE1, $FFE7, $FFEE, $FFF4, $FFFA
+	; Extra values for cosine
+	dc.w	$0000, $0006, $000C, $0012, $0019, $001F, $0025, $002B
+	dc.w	$0031, $0038, $003E, $0044, $004A, $0050, $0056, $005C
+	dc.w	$0061, $0067, $006D, $0073, $0078, $007E, $0083, $0088
+	dc.w	$008E, $0093, $0098, $009D, $00A2, $00A7, $00AB, $00B0
+	dc.w	$00B5, $00B9, $00BD, $00C1, $00C5, $00C9, $00CD, $00D1
+	dc.w	$00D4, $00D8, $00DB, $00DE, $00E1, $00E4, $00E7, $00EA
+	dc.w	$00EC, $00EE, $00F1, $00F3, $00F4, $00F6, $00F8, $00F9
+	dc.w	$00FB, $00FC, $00FD, $00FE, $00FE, $00FF, $00FF, $00FF
+
+; -------------------------------------------------------------------------
+; Check graphics status
+; -------------------------------------------------------------------------
+; RETURNS:
+;	Stat 0	- 0 if inactive, -1 if busy
+; -------------------------------------------------------------------------
+
+CheckGfx:
+	tst.w	GFXON.w				; Is the graphics chip busy?
+	bmi.s	.Busy				; If so, branch
+
+.SendWordRAM:
+	bset	#0,MEMMODE.w			; Give the Main CPU Word RAM access
+	beq.s	.SendWordRAM
+
+	move.w	#0,SUBCOM0.w			; Mark as inactive
+	rts
+
+.Busy:
+	move.w	#-1,SUBCOM0.w			; Mark as busy
+	rts
+
+; -------------------------------------------------------------------------

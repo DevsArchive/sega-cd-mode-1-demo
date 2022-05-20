@@ -1,0 +1,957 @@
+; ---------------------------------------------------------------------------
+; Mode 1 Demo
+; By Devon 2022
+; ---------------------------------------------------------------------------
+; PCM driver
+; ---------------------------------------------------------------------------
+
+	include	"subcpu/pcmscript.i"
+
+; ---------------------------------------------------------------------------
+; Constants
+; ---------------------------------------------------------------------------
+
+PCMBANKSZ	EQU	$1000				; Wave bank size
+PCMLOOPCNT	EQU	$20				; Stream loop flag count
+
+; ---------------------------------------------------------------------------
+; PCM channel structure
+; ---------------------------------------------------------------------------
+
+	rsreset
+pcmChnID	rs.b	1				; Channel ID
+pcmFlags	rs.b	1				; Flags
+
+pcmTrkAddr	rs.l	1				; Tracker data address
+pcmInsTable	rs.l	1				; Instrument table address
+
+pcmDuration	rs.b	1				; Note duration
+pcmSavedDur	rs.b	1				; Saved note duration
+
+pcmVolume	rs.b	1				; Volume
+pcmPanning	rs.b	1				; Panning
+pcmFreq		rs.w	1				; Frequency
+pcmNote		rs.b	1				; Note ID
+
+pcmIns		rs.b	1				; Instrument ID
+pcmInsTrns	rs.b	1				; Instrument transposition
+
+pcmEnvMode	rs.b	1				; Envelope mode
+pcmEnvVolume	rs.b	1				; Envelope volume level
+pcmAttackRate	rs.b	1				; Attack rate
+pcmDecayRate	rs.b	1				; Decay rate
+pcmSustainLvl	rs.b	1				; Sustain level
+pcmSustainRate	rs.b	1				; Sustain rate
+pcmReleaseRate	rs.b	1				; Release rate
+
+pcmSamplePos	rs.l	1				; Sample position
+pcmSampleStart	rs.l	1				; Sample start address
+pcmSampleLoop	rs.l	1				; Sample loop position
+pcmSampleSize	rs.l	1				; Size of sample
+pcmSamplesLeft	rs.l	1				; Samples left to stream
+pcmStreamBuf	rs.l	1				; Stream buffer address
+pcmLastAddr	rs.w	1				; Last wave RAM playback position
+pcmBytesLeft	rs.w	1				; Bytes left in bank
+
+pcmChnSize	rs.b	0				; Size of structure
+
+; ---------------------------------------------------------------------------
+; PCM channel flags
+; ---------------------------------------------------------------------------
+
+	rsreset
+PCMFSMPBANK	rs.b	1				; Sample wave bank
+PCMFSMPSET	rs.b	1				; Sample setup
+PCMFSMPSTRM	rs.b	1				; Sample stream
+PCMFLEGATO	rs.b	1				; Legato
+		rs.b	1
+		rs.b	1
+		rs.b	1
+PCMFPLAY	rs.b	1				; Playing
+
+; ---------------------------------------------------------------------------
+; PCM instrument sample metadata structure
+; ---------------------------------------------------------------------------
+
+	rsreset
+pcmISmpAddr	rs.l	1				; Sample data address
+pcmISmpLen	rs.l	1				; Size of sample data
+pcmISmpLoop	rs.l	1				; Loop point
+pcmISmpTrns	rs.b	1				; Transposition
+
+pcmISmpAtk	rs.b	1				; Attack rate
+pcmISmpDec	rs.b	1				; Decay rate
+pcmISmpSLv	rs.b	1				; Sustain level
+pcmISmpSus	rs.b	1				; Sustain rate
+pcmISmpRel	rs.b	1				; Release rate
+
+pcmISmpNStart	rs.b	1				; Note range start
+pcmISmpNEnd	rs.b	1				; Note range end
+
+pcmISmpSize	rs.b	0				; size of structure
+
+; ---------------------------------------------------------------------------
+; Initial PCM channel structure data
+; ---------------------------------------------------------------------------
+
+PCMCHNDAT macro id
+	dcb.b	pcmChnID, 0				; Fill data before channel ID with zero
+	dc.b	\id					; Channel ID
+	dcb.b	pcmChnSize-(pcmChnID+1), 0		; Fill the rest with zero
+	endm
+
+; ---------------------------------------------------------------------------
+; PCM register write
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	snd - Sound on/off flag
+;	reg - Data register to use
+; ---------------------------------------------------------------------------
+
+PCMREG macro src, dest, snd, reg
+	move.b	\src,\dest				; Write register data
+	if (\snd)<>0					; Delay
+		moveq	#$28-1,\reg
+	else
+		moveq	#5-1,\reg
+	endif
+	dbf	\reg,*
+	endm
+
+; ---------------------------------------------------------------------------
+; Initialize PCM
+; ---------------------------------------------------------------------------
+
+InitPCM:
+	bsr.w	StopPCMChannels				; Stop all PCM channels
+
+	lea	TestTrack(pc),a1			; Get music data
+	move.l	a1,d1
+
+	moveq	#0,d0					; Instrument table
+	move.w	(a1)+,d0
+	add.l	d1,d0
+
+	move.w	(a1)+,d4				; Channel count
+	bmi.s	.Done					; If there are none, branch
+
+.InitTracks:
+	moveq	#0,d2					; Track data
+	move.w	(a1)+,d2
+	add.l	d1,d2
+
+	moveq	#0,d3					; Get track RAM
+	move.b	(a1)+,d3
+	add.w	d3,d3
+	add.w	d3,d3
+	movea.l	.Channels(pc,d3.w),a0
+	
+	move.b	(a1)+,pcmVolume(a0)			; Set volume
+	move.b	(a1)+,pcmPanning(a0)			; Set panning
+
+	addq.w	#1,a1					; TODO
+
+	move.l	d2,pcmTrkAddr(a0)			; Set track data address
+	move.l	d0,pcmInsTable(a0)			; Set instrument table
+	
+	move.b	#1<<PCMFPLAY,pcmFlags(a0)		; Set flags
+	move.b	#NREST,pcmNote(a0)			; Set rest note
+
+	dbf	d4,.InitTracks				; Loop until finished
+
+.Done:
+	rts
+
+; ---------------------------------------------------------------------------
+
+.Channels:
+	dc.l	pcm_channel_1				; Channel 1
+	dc.l	pcm_channel_2				; Channel 2
+	dc.l	pcm_channel_3				; Channel 3
+	dc.l	pcm_channel_4				; Channel 4
+	dc.l	pcm_channel_5				; Channel 5
+	dc.l	pcm_channel_6				; Channel 6
+	dc.l	pcm_channel_7				; Channel 7
+	dc.l	pcm_channel_8				; Channel 8
+
+; ---------------------------------------------------------------------------
+; Update PCM tracker
+; ---------------------------------------------------------------------------
+
+UpdatePCMTracker:
+	lea	pcm_channel_1(pc),a0			; Update channel 1
+	bsr.s	UpdatePCMChannel
+	lea	pcm_channel_2(pc),a0			; Update channel 2
+	bsr.s	UpdatePCMChannel
+	lea	pcm_channel_3(pc),a0			; Update channel 3
+	bsr.s	UpdatePCMChannel
+	lea	pcm_channel_4(pc),a0			; Update channel 4
+	bsr.s	UpdatePCMChannel
+	lea	pcm_channel_5(pc),a0			; Update channel 5
+	bsr.s	UpdatePCMChannel
+	lea	pcm_channel_6(pc),a0			; Update channel 6
+	bsr.s	UpdatePCMChannel
+	lea	pcm_channel_7(pc),a0			; Update channel 7
+	bsr.s	UpdatePCMChannel
+	lea	pcm_channel_8(pc),a0			; Update channel 8
+
+; ---------------------------------------------------------------------------
+; Update PCM channel
+; ---------------------------------------------------------------------------
+
+UpdatePCMChannel:
+	tst.b	pcmFlags(a0)				; Is this channel playing?
+	bpl.w	.End					; If not, branch
+
+	subq.b	#1,pcmDuration(a0)			; Decrement duration
+	bpl.w	.UpdateNote				; If it hasn't run out, branch
+
+; ---------------------------------------------------------------------------
+
+.ParseTrackData:
+	movea.l	pcmTrkAddr(a0),a1			; Get tracker data address
+
+.ParseLoop:
+	moveq	#0,d0					; Read byte
+	move.b	(a1)+,d0
+	cmpi.b	#PCMCSTART,d0				; Is it a command?
+	bcs.s	.NotCommand				; If not, branch
+
+	lea	PCMCommands(pc),a2			; Jump to command handler
+	subi.b	#PCMCSTART,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	jsr	(a2,d0.w)
+
+	bra.s	.ParseLoop				; Continue parsing
+
+; ---------------------------------------------------------------------------
+
+.NotCommand:
+	cmpi.b	#PCMNSTART,d0				; Is this a note?
+	bcs.s	.GotDuration				; If not, branch
+	move.b	d0,pcmNote(a0)				; If so, set note ID
+
+	cmpi.b	#PCMNSTART,(a1)				; Is the next byte a duration?
+	bcc.s	.ParseDone				; If not, branch
+	move.b	(a1)+,d0				; Get duration value
+
+.GotDuration:
+	move.b	d0,pcmSavedDur(a0)			; Save duration
+
+; ---------------------------------------------------------------------------
+
+.ParseDone:
+	move.l	a1,pcmTrkAddr(a0)			; Update tracker data address
+	move.b	pcmSavedDur(a0),pcmDuration(a0)		; Set duration
+	
+	moveq	#0,d0					; Get current note
+	move.b	pcmNote(a0),d0
+	subi.b	#PCMNSTART,d0
+	beq.s	.RestNote				; If it's a rest note, branch
+	cmpi.b	#NCUT-PCMNSTART,d0			; Is it a cut note?
+	beq.s	.CutNote				; If so, branch
+
+; ---------------------------------------------------------------------------
+
+.RegularNote:
+	bclr	#PCMFLEGATO,pcmFlags(a0)		; Clear legato flag
+	bne.s	.GetFreq				; If it was set, branch
+	bsr.w	KeyOffPCM				; Key off
+	
+	movea.l	pcmInsTable(a0),a1			; Get instrument table entry
+	moveq	#0,d1
+	move.b	pcmIns(a0),d1
+	add.w	d1,d1
+	adda.w	(a1,d1.w),a1
+
+.FindSample:
+	move.b	pcmISmpNStart(a1),d1			; Get sample start note
+	cmpi.b	#$FF,d1					; Is this the end of the sample list?
+	beq.s	.UpdateNote				; If so, don't play a sample
+	
+	cmp.b	d1,d0					; Is the current note at least the sample start note?
+	bcs.s	.NextSample				; If not, branch
+	cmp.b	pcmISmpNEnd(a1),d0			; Is the current note within the note range?
+	bls.s	.StartSample				; If so, branch
+
+.NextSample:
+	lea	pcmISmpSize(a1),a1			; Next sample
+	bra.s	.FindSample				; Loop until sample is found
+
+.StartSample:
+	move.l	(a1)+,pcmSampleStart(a0)		; Sample start
+	move.l	(a1)+,pcmSampleSize(a0)			; Sample size
+	move.l	(a1)+,pcmSampleLoop(a0)			; Sample loop
+	move.b	(a1)+,pcmInsTrns(a0)			; Sample transposition
+	move.b	(a1)+,pcmAttackRate(a0)			; Envelope parameters
+	move.l	(a1)+,pcmDecayRate(a0)
+
+	bclr	#PCMFSMPSET,pcmFlags(a0)		; Clear sample setup flag
+	clr.b	pcmEnvMode(a0)				; Reset envelope
+	clr.b	pcmEnvVolume(a0)
+
+.GetFreq:
+	lea	PCMFrequencies(pc),a2			; Get frequency
+	move.b	pcmInsTrns(a0),d1
+	ext.w	d1
+	add.w	d1,d0
+	add.w	d0,d0
+	move.w	((PCMNSTART-NA0)*2)(a2,d0.w),pcmFreq(a0)
+
+	bsr.s	.UpdateNote				; Update note
+	bra.w	KeyOnPCM				; Key on
+
+; ---------------------------------------------------------------------------
+
+.RestNote:
+	move.b	#8,pcmEnvMode(a0)			; Set to release mode
+	bra.s	.UpdateNote				; Update note
+
+; ---------------------------------------------------------------------------
+
+.CutNote:
+	bsr.w	KeyOffPCM				; Key off
+
+; ---------------------------------------------------------------------------
+
+.UpdateNote:
+	bsr.w	ProcPCMEnvelope				; Update PCM envelope
+	bra.w	UpdatePCMChnData			; Update data
+
+.End:
+	rts
+
+; ---------------------------------------------------------------------------
+; Frequency table
+; ---------------------------------------------------------------------------
+
+	;	A      A#/Bb  B      C      C#/Db  D      D#/Eb  E      F      F#/Gb  G      G#/Ab
+	dc.w	$0010, $0011, $0012, $0013, $0014, $0015, $0017, $0018, $0019, $001B, $001D, $001E
+	dc.w	$0020, $0022, $0024, $0026, $0028, $002B, $002D, $0030, $0033, $0036, $0039, $003C
+
+PCMFrequencies:
+	dc.w	$0040, $0044, $0048, $004C, $0051, $0055, $005B, $0060, $0066, $006C, $0072, $0079
+	dc.w	$0080, $0088, $0090, $0098, $00A1, $00AB, $00B5, $00C0, $00CB, $00D7, $00E4, $00F2
+	dc.w	$0100, $010F, $011F, $0130, $0143, $0156, $016A, $0180, $0196, $01AF, $01C8, $01E3
+	dc.w	$0200, $021E, $023F, $0261, $0285, $02AB, $02D4, $02FF, $032D, $035D, $0390, $03C7
+	dc.w	$0400, $043D, $047D, $04C2, $050A, $0557, $05A8, $05FE, $0659, $06BA, $0721, $078D
+	dc.w	$0800, $087A, $08FB, $0983, $0A14, $0AAE, $0B50, $0BFD, $0CB3, $0D74, $0E41, $0F1A
+	dc.w	$1000, $10F4, $11F6, $1307, $1429, $155C, $16A1, $17F9, $1966, $1AE9, $1C82, $1E34
+	dc.w	$2000, $21E7, $23EB, $260E, $2851, $2AB7, $2D41, $2FF2, $32CC, $35D1, $3904, $3C68
+
+	dc.w	$4000, $43CE, $47D6, $4C1C, $50A3, $556E, $5A82, $5FE4, $6598, $6BA2, $7209, $78D1
+	dc.w	$8000, $879C, $8FAD, $9838, $A145, $AADC, $B505, $BFC9, $CB30, $D745, $E412, $F1A2
+
+; ---------------------------------------------------------------------------
+; Stop all channels
+; ---------------------------------------------------------------------------
+
+StopPCMChannels:
+	st	d0					; Disable all channels
+	move.b	d0,pcmOnFlags
+	move.b	d0,PCMONOFF
+
+	lea	pcm_channel_1(pc),a0			; Start with channel 1
+	moveq	#8-1,d0					; Number of channels
+
+.StopLoop:
+	clr.b	pcmFlags(a0)				; Clear flags
+	
+	move.b	pcmChnID(a0),d1				; Control channel
+	ori.b	#$40,d1
+	PCMREG	d1,PCMCTRL,0,d1
+	
+	clr.b	pcmVolume(a0)				; Mute volume
+	PCMREG	#0,PCMENV,0,d1
+
+	lea	pcmChnSize(a0),a0			; Next channel
+	dbf	d0,.StopLoop				; Loop until all channels are stopped
+	rts
+
+; ---------------------------------------------------------------------------
+; Set channel key on
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	a0.l - PCM channel data structure
+; ---------------------------------------------------------------------------
+
+KeyOnPCM:
+	move.b	pcmOnFlags(pc),d0			; Set channel key on
+	move.b	pcmChnID(a0),d1
+	bclr	d1,d0
+	move.b	d0,pcmOnFlags
+	move.b	d0,PCMONOFF
+	rts
+
+; ---------------------------------------------------------------------------
+; Set channel key off
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	a0.l - PCM channel data structure
+; ---------------------------------------------------------------------------
+
+KeyOffPCM:
+	move.b	pcmOnFlags(pc),d1			; Set channel key off
+	move.b	pcmChnID(a0),d2
+	bset	d2,d1
+	move.b	d1,pcmOnFlags
+	move.b	d1,PCMONOFF
+
+	bclr	#PCMFSMPSTRM,pcmFlags(a0)		; Stop streaming sample data
+	rts
+
+; ---------------------------------------------------------------------------
+; Process channel envelope
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	a0.l - PCM channel data structure
+; ---------------------------------------------------------------------------
+
+ProcPCMEnvelope:
+	moveq	#0,d0					; Go to envelope mode
+	move.b	pcmEnvMode(a0),d0
+	jmp	.Modes(pc,d0.w)
+	
+; ---------------------------------------------------------------------------
+
+.Modes:
+	bra.s	PCMEnv_Attack				; Attack
+	bra.s	PCMEnv_Decay				; Decay
+	bra.s	PCMEnv_Sustain				; Sustain
+	rts						; Sustain done
+	bra.s	PCMEnv_Release				; Release
+	rts						; Release done
+
+; ---------------------------------------------------------------------------
+; Attack mode
+; ---------------------------------------------------------------------------
+
+PCMEnv_Attack:
+	move.b	pcmAttackRate(a0),d0			; Add attack rate
+	move.b	pcmEnvVolume(a0),d1
+	add.b	d0,d1
+	bcs.s	.ModeDone				; If it has overflowed, branch
+	cmpi.b	#$FF,d1					; Is the envelope volume at max level?
+	bne.s	.SetEnvVol				; If not, branch
+
+.ModeDone:
+	addq.b	#2,pcmEnvMode(a0)			; Set to decay mode
+	move.b	#$FF,d1					; Cap at max level
+
+.SetEnvVol:
+	move.b	d1,pcmEnvVolume(a0)			; Update volume envelope
+	rts
+
+; ---------------------------------------------------------------------------
+; Decay mode
+; ---------------------------------------------------------------------------
+
+PCMEnv_Decay:
+	move.b	pcmDecayRate(a0),d0			; Subtract decay rate
+	move.b	pcmEnvVolume(a0),d1
+	sub.b	d0,d1
+	bcs.s	.ModeDone				; If it has overflowed, branch
+	cmp.b	pcmSustainLvl(a0),d1			; Is the envelope volume at the sustain level?
+	bhi.s	.SetEnvVol				; If not, branch
+
+.ModeDone:
+	addq.b	#2,pcmEnvMode(a0)			; Set to sustain mode
+	move.b	pcmSustainLvl(a0),d1			; Cap at sustain level
+	bne.s	.SetEnvVol				; If it isn't at min level, branch
+	addq.b	#2,pcmEnvMode(a0)			; Set to done mode
+
+.SetEnvVol:
+	move.b	d1,pcmEnvVolume(a0)			; Update volume envelope
+	rts
+
+; ---------------------------------------------------------------------------
+; Sustain/release mode
+; ---------------------------------------------------------------------------
+
+PCMEnv_Sustain:
+	move.b	pcmSustainRate(a0),d0			; Use sustain rate
+	bra.s	PCMEnv_SustainRel
+
+; ---------------------------------------------------------------------------
+
+PCMEnv_Release:
+	move.b	pcmReleaseRate(a0),d0			; Use release rate
+
+; ---------------------------------------------------------------------------
+
+PCMEnv_SustainRel:
+	move.b	pcmEnvVolume(a0),d1			; Subtract rate
+	sub.b	d0,d1
+	bcs.s	.ModeDone				; If it has overflowed, branch
+	bne.s	.SetEnvVol				; If it hasn't gone to min level, branch
+
+.ModeDone:
+	addq.b	#2,pcmEnvMode(a0)			; Set to done mode
+	bsr.w	KeyOffPCM				; Key off
+	moveq	#0,d1					; Cap at min level
+
+.SetEnvVol:
+	move.b	d1,pcmEnvVolume(a0)			; Update volume envelope
+	rts
+
+; ---------------------------------------------------------------------------
+; Command table
+; ---------------------------------------------------------------------------
+
+PCMCommands:
+	bra.w	PCMCmd_Jump				; Jump
+	bra.w	PCMCmd_Legato				; Legato
+	bra.w	PCMCmd_Instrument			; Instrument
+
+; ---------------------------------------------------------------------------
+; Jump
+; ---------------------------------------------------------------------------
+
+PCMCmd_Jump:
+	move.b	(a1)+,-(sp)				; Jump
+	move.w	(sp)+,d0
+	move.b	(a1)+,d0
+	adda.w	d0,a1
+	rts
+
+; ---------------------------------------------------------------------------
+; Set legato
+; ---------------------------------------------------------------------------
+
+PCMCmd_Legato:
+	bset	#PCMFLEGATO,pcmFlags(a0)		; Set legato flag
+	rts
+
+; ---------------------------------------------------------------------------
+; Set instrument
+; ---------------------------------------------------------------------------
+
+PCMCmd_Instrument:
+	move.b	(a1)+,d0				; Get instrument ID
+	cmp.b	pcmIns(a0),d0				; Is it different from the current one?
+	beq.s	.End					; If so, branch
+
+	move.b	d0,pcmIns(a0)				; Set new instrument ID
+	bra.w	KeyOffPCM				; Key off
+
+.End:
+	rts
+
+; ---------------------------------------------------------------------------
+; Update PCM samples
+; ---------------------------------------------------------------------------
+
+UpdatePCMData:
+	lea	pcm_channel_1(pc),a0			; Channel 1
+	bsr.s	UpdatePCMChnData
+	lea	pcm_channel_2(pc),a0			; Channel 2
+	bsr.s	UpdatePCMChnData
+	lea	pcm_channel_3(pc),a0			; Channel 3
+	bsr.s	UpdatePCMChnData
+	lea	pcm_channel_4(pc),a0			; Channel 4
+	bsr.s	UpdatePCMChnData
+	lea	pcm_channel_5(pc),a0			; Channel 5
+	bsr.s	UpdatePCMChnData
+	lea	pcm_channel_6(pc),a0			; Channel 6
+	bsr.s	UpdatePCMChnData
+	lea	pcm_channel_7(pc),a0			; Channel 7
+	bsr.s	UpdatePCMChnData
+	lea	pcm_channel_8(pc),a0			; Channel 8
+
+; ---------------------------------------------------------------------------
+; Update PCM channel data
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	a0.l - PCM channel data structure
+; ---------------------------------------------------------------------------
+
+UpdatePCMChnData:
+	tst.b	pcmFlags(a0)				; Is this channel playing?
+	bpl.w	.End					; If not, branch
+
+	move.b	pcmChnID(a0),d0				; Control channel
+	ori.b	#$C0,d0
+	PCMREG	d0,PCMCTRL,1,d0
+
+	moveq	#0,d0					; Get channel volume
+	move.b	pcmVolume(a0),d0
+
+	moveq	#0,d1					; Multiply envelope volume level
+	move.b	pcmEnvVolume(a0),d1
+	addq.w	#1,d1
+	mulu.w	d1,d0
+	move.w	d0,-(sp)
+
+	PCMREG	(sp)+,PCMENV,1,d0			; Set volume
+	PCMREG	pcmPanning(a0),PCMPAN,1,d0		; Set panning
+	PCMREG	pcmFreq+1(a0),PCMFDL,1,d0		; Set frequency
+	PCMREG	pcmFreq(a0),PCMFDH,1,d0
+
+; ---------------------------------------------------------------------------
+
+.UpdateSample:
+	btst	#PCMFSMPSET,pcmFlags(a0)		; Has the sample already been set up?
+	bne.w	.StreamSample				; If so, branch
+
+	move.l	pcmSampleStart(a0),pcmSamplePos(a0)	; Set sample position
+	beq.w	.End					; If there's no sample to stream, branch
+
+	move.l	pcmSampleSize(a0),d0			; Get sample size
+	beq.w	.End					; If there's no stample to stream, branch
+	cmpi.l	#PCMBANKSZ*2,d0				; Is the sample small enough to be statically stored?
+	bcc.w	.InitStream				; If not, branch
+	
+; ---------------------------------------------------------------------------
+
+.InitStaticSample:
+	ori.b	#(1<<PCMFSMPSET),pcmFlags(a0)		; Set sample setup flag
+
+	move.b	pcmChnID(a0),d1				; Set up wave RAM start address
+	ror.b	#3,d1
+	PCMREG	d1,PCMST,1,d2
+
+	lsl.w	#8,d1					; Set up wave RAM loop address
+	add.w	pcmSampleLoop+2(a0),d1
+	PCMREG	d1,PCMLSL,1,d2
+	lsr.w	#8,d1
+	PCMREG	d1,PCMLSH,1,d2
+
+	move.b	pcmChnID(a0),d1				; Set up first wave bank
+	add.b	d1,d1
+	tas.b	d1
+	move.b	d1,PCMCTRL
+
+	movea.l	pcmSampleStart(a0),a1			; Get pointer to sample
+	lea	PCMDATA,a2				; Wave RAM
+
+	move.w	d0,d2					; Get size of sample
+	cmpi.w	#PCMBANKSZ,d2				; Is it larger than a wave bank?
+	bcs.s	.CopyToBank1				; If not, branch
+	move.w	#PCMBANKSZ,d2				; Cap at wave bank size
+
+.CopyToBank1:
+	subq.w	#1,d2					; Subtract 1 for DBF
+
+.CopyToBank1Loop:
+	move.b	(a1)+,(a2)+				; Copy first set of sample data
+	addq.w	#1,a2
+	dbf	d2,.CopyToBank1Loop
+
+	addq.b	#1,d1					; Set up second wave bank
+	move.b	d1,PCMCTRL
+
+	move.w	d0,d1					; Get remaining number of bytes to copy
+	subi.w	#PCMBANKSZ,d1
+	subq.w	#1,d1					; Subtract 1 for DBF
+	bmi.s	.NoBank2				; If there are none, branch
+	
+	lea	PCMDATA,a2				; Wave RAM
+
+.CopyToBank2:
+	move.b	(a1)+,(a2)+				; Copy second set of sample data
+	addq.w	#1,a2
+	dbf	d1,.CopyToBank2
+	
+.NoBank2:
+	rts
+
+; ---------------------------------------------------------------------------
+
+.InitStream:
+	move.l	d0,pcmSamplesLeft(a0)			; Set number of samples left to stream
+							; Set wave bank ID, sample setup flag, and stream flag
+	ori.b	#(1<<PCMFSMPBANK)|(1<<PCMFSMPSET)|(1<<PCMFSMPSTRM),pcmFlags(a0)
+	move.l	#PCMDATA,pcmStreamBuf(a0)		; Set buffer address
+
+	move.b	pcmChnID(a0),d0				; Set initial wave RAM address
+	lsl.b	#5,d0
+	move.b	d0,pcmLastAddr(a0)
+	clr.b	pcmLastAddr+1(a0)
+
+	PCMREG	#0,PCMLSL,1,d1				; Set up wave RAM loop address
+	PCMREG	d0,PCMLSH,1,d1
+	PCMREG	d0,PCMST,1,d1				; Set up wave RAM start address
+
+	move.b	pcmChnID(a0),d0				; Stream initial sample data
+	add.b	d0,d0
+	tas.b	d0
+	move.b	d0,PCMCTRL
+	move.w	d0,-(sp)
+	move.w	#PCMBANKSZ,d0
+	move.w	d0,pcmBytesLeft(a0)
+	bsr.w	StreamPCMData
+	
+	move.w	#PCMBANKSZ-PCMLOOPCNT,pcmBytesLeft(a0)	; Size of second wave bank
+
+	move.w	(sp)+,d0				; Set up loop flags in second wave bank			
+	addq.b	#1,d0
+	move.b	d0,PCMCTRL
+
+	lea	PCMDATA+((PCMBANKSZ-PCMLOOPCNT)*2),a1
+	move.w	#PCMLOOPCNT-1,d1
+
+.SetupLoopFlags:
+	move.b	#$FF,(a1)+
+	addq.w	#1,a1
+	dbf	d1,.SetupLoopFlags
+
+	rts
+
+; ---------------------------------------------------------------------------
+
+.StreamSample:
+	btst	#PCMFSMPSTRM,pcmFlags(a0)		; Are we streaming a sample?
+	beq.w	.End					; If not, branch
+	tst.l	pcmSamplePos(a0)			; Is there a sample playing?
+	beq.w	.End					; If not, branch
+
+	lea	PCMADDR,a1				; Get current playback address
+	moveq	#0,d0
+	move.b	pcmChnID(a0),d0
+	add.b	d0,d0
+	add.b	d0,d0
+	move.b	2(a1,d0.w),d1
+	move.b	d1,-(sp)
+	move.w	(sp)+,d2
+	move.b	(a1,d0.w),d2
+	
+	move.w	pcmLastAddr(a0),d0			; Get number of bytes played back since last time
+	move.w	d2,pcmLastAddr(a0)
+
+	move.b	pcmFlags(a0),d3				; Have we swapped wave banks?
+	lsr.b	#4,d1
+	andi.b	#1,d1
+	andi.b	#1<<PCMFSMPBANK,d3
+	eor.b	d3,d1
+	beq.s	.End					; If not, branch
+
+	move.b	pcmChnID(a0),d1				; Set up wave bank to stream to
+	add.b	d1,d1
+	add.b	d3,d1
+	tas.b	d1
+	move.b	d1,PCMCTRL
+
+	cmp.w	d0,d2					; Has the playback wrapped to the top of the wave banks?
+	bcc.s	.NoWrap					; If not, branch
+	andi.w	#$1FFF,d0				; Copy count = ($2000 - (last addr & $1FFF))+ new addr
+	subi.w	#$2000,d0
+	neg.w	d0
+	add.w	d2,d0
+	bra.s	.CopyData
+
+.NoWrap:
+	sub.w	d2,d0					; Copy count = new addr - last addr
+	neg.w	d0
+
+.CopyData:
+	add.w	d0,d0					; Multiply count to stay ahead
+	add.w	d0,d0
+	bsr.w	StreamPCMData				; Stream sample data
+
+	tst.w	pcmBytesLeft(a0)			; Has the bank been filled?
+	bne.s	.BlockDone				; If not, branch
+
+	lea	PCMDATA,a2				; Reset buffer address
+	move.w	#PCMBANKSZ,d1				; Size of wave bank
+	bchg	#PCMFSMPBANK,pcmFlags(a0)		; Swap wave banks
+	bne.s	.BankDone				; If we're gonna stream to the first bank, branch
+	subi.w	#PCMLOOPCNT,d1				; Offset loop flag count for second bank
+
+.BankDone:
+	move.w	d1,pcmBytesLeft(a0)			; Update bytes left in bank
+
+.BlockDone:
+	move.l	a2,pcmStreamBuf(a0)			; Update buffer address
+
+.End:
+	rts
+
+; ---------------------------------------------------------------------------
+; Stream sample data
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	d0.w - Number of samples to copy
+;	a0.l - PCM channel data structure
+; RETURNS:
+;	a2.l - Next buffer address
+; ---------------------------------------------------------------------------
+
+StreamPCMData:
+	andi.l	#$FFFF,d0				; Get total number of samples to copy
+	move.l	d0,d1
+	movea.l	pcmStreamBuf(a0),a2			; Get buffer address
+
+.StreamLoop:
+	moveq	#0,d2					; Is there enough room in the bank to copy into?
+	move.w	pcmBytesLeft(a0),d2
+	cmp.l	d2,d0
+	bls.s	.ChkSamplesLeft				; If so, branch
+	move.l	d2,d0					; If not, only stream what can be fit
+
+.ChkSamplesLeft:
+	cmp.l	pcmSamplesLeft(a0),d0			; Is there enough sample data to copy?
+	bls.s	.CopySamples				; If so, branch
+	move.l	pcmSamplesLeft(a0),d0			; If not, only copy the samples that are left
+
+.CopySamples:
+	sub.l	d0,d1					; Get number of samples left in this packet to copy afterwards
+	sub.l	d0,pcmSamplesLeft(a0)			; Get number of samples left in data to copy afterwards
+	sub.w	d0,pcmBytesLeft(a0)			; Get number of bytes left in bank to copy to afterwards
+	
+	subq.w	#1,d0					; Subtract 1 for DBF
+	bmi.s	.End					; If there are no samples to stream, branch
+
+	movea.l	pcmSamplePos(a0),a1			; Get current sample position
+	
+.CopySamplesLoop:
+	move.b	(a1)+,(a2)+				; Copy sample data
+	addq.w	#1,a2
+	dbf	d0,.CopySamplesLoop
+
+	tst.l	pcmSamplesLeft(a0)			; Are we at the end of the sample?
+	bne.s	.CheckStreamDone			; If not, branch
+
+	movea.l	pcmSampleStart(a0),a1			; Get sample loop position
+	move.l	pcmSampleLoop(a0),d0
+	bmi.w	KeyOffPCM				; If the sample is done playing, branch
+	add.l	d0,a1
+	
+	sub.l	pcmSampleSize(a0),d0			; Get length between loop and end positions
+	neg.l	d0
+	move.l	d0,pcmSamplesLeft(a0)
+
+.CheckStreamDone:
+	move.l	a1,pcmSamplePos(a0)			; Update sample position
+
+	move.l	d1,d0					; Get number of samples left to stream
+	bne.s	.StreamLoop				; If there are some, branch
+
+.End:
+	rts
+
+; ---------------------------------------------------------------------------
+; PCM data
+; ---------------------------------------------------------------------------
+
+pcmOnFlags:	dc.b	$FF				; On/off flags
+		even
+
+pcm_channel_1:	PCMCHNDAT 0				; PCM channel 1
+pcm_channel_2:	PCMCHNDAT 1				; PCM channel 2
+pcm_channel_3:	PCMCHNDAT 2				; PCM channel 3
+pcm_channel_4:	PCMCHNDAT 3				; PCM channel 4
+pcm_channel_5:	PCMCHNDAT 4				; PCM channel 5
+pcm_channel_6:	PCMCHNDAT 5				; PCM channel 6
+pcm_channel_7:	PCMCHNDAT 6				; PCM channel 7
+pcm_channel_8:	PCMCHNDAT 7				; PCM channel 8
+
+; ---------------------------------------------------------------------------
+
+TestTrack:
+	PCMTRKSTART
+	PCMINSTBL	TestTrack_Instruments
+
+	PCMCHNSTART
+	PCMCHNPTR	TestTrack_PCM1, 0, $BF, $FF
+	PCMCHNPTR	TestTrack_PCM2, 1, $EF, $FF
+	PCMCHNPTR	TestTrack_PCM3, 2, $DF, $0F
+	PCMCHNPTR	TestTrack_PCM4, 3, $FF, $F0
+	PCMCHNPTR	TestTrack_PCM5, 4, $6F, $FF
+	PCMCHNEND
+
+TestTrack_PCM1:
+	PCMCINS		$00
+	dc.b		NA3, $0F
+	dc.b		NA4, $0F
+	PCMCJUMP	TestTrack_PCM1
+
+TestTrack_PCM2:
+	PCMCINS		$01
+	dc.b		NA5, $3F
+	dc.b		PCMCLEGATO
+	dc.b		NA5, $3F
+	PCMCJUMP	TestTrack_PCM2
+	
+TestTrack_PCM3:
+	PCMCINS		$02
+	dc.b		NA4, $1F
+	dc.b		NREST, $1F
+	PCMCJUMP	TestTrack_PCM3
+	
+TestTrack_PCM4:
+	PCMCINS		$02
+	dc.b		NREST, $1F
+	dc.b		NAS4, $1F
+	PCMCJUMP	TestTrack_PCM4
+	
+TestTrack_PCM5:
+	PCMCINS		$02
+	dc.b		NB4, $07
+	PCMCJUMP	TestTrack_PCM5
+
+	even
+
+TestTrack_Instruments:
+	PCMINSSTART
+	PCMINSPTR	.0
+	PCMINSPTR	.1
+	PCMINSPTR	.2
+
+.0:
+	PCMINSDAT	TestSample, &
+			TestSample_End-TestSample, TestSample_End-TestSample-$21, &
+			NA0, NGS8, 0, &
+			$FF, $01, $E0, $01, $08
+	PCMINSEND
+
+.1:
+	PCMINSDAT	PadSample, &
+			PadSample_End-PadSample, 15431, &
+			NA0, NGS8, 0, &
+			$10, $02, $00, $00, $FF
+	PCMINSEND
+
+.2:
+	PCMINSDAT	KickSample, &
+			KickSample_End-KickSample, KickSample_End-KickSample-$21, &
+			NA4, NA4, 0, &
+			$FF, $00, $00, $00, $FF
+	PCMINSDAT	SnareSample, &
+			SnareSample_End-SnareSample, SnareSample_End-SnareSample-$21, &
+			NAS4, NAS4, -1, &
+			$FF, $00, $00, $00, $FF
+	PCMINSDAT	HatSample, &
+			HatSample_End-HatSample, HatSample_End-HatSample-$21, &
+			NB4, NB4, -2, &
+			$FF, $00, $00, $00, $FF
+	PCMINSEND
+
+; ---------------------------------------------------------------------------
+
+TestSample:
+	incbin	"bass.pcm"
+TestSample_End:
+	even
+
+PadSample:
+	incbin	"pad.pcm"
+PadSample_End:
+	even
+
+KickSample:
+	incbin	"kick.pcm"
+KickSample_End:
+	even
+
+SnareSample:
+	incbin	"snare.pcm"
+SnareSample_End:
+	even
+
+HatSample:
+	incbin	"hat.pcm"
+HatSample_End:
+	even
+
+; ---------------------------------------------------------------------------

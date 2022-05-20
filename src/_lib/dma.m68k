@@ -1,0 +1,207 @@
+; ---------------------------------------------------------------------------
+; Mega Drive Framework
+; By Devon 2022
+; ---------------------------------------------------------------------------
+; Ultra DMA Queue by Flamewing
+; https://github.com/flamewing/ultra-dma-queue
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; Queue DMA transfer
+; ---------------------------------------------------------------------------
+; OPTIONS:
+; 	DMA_SRC_BYTES (default 1)
+; 	DMA_RAM_SAFE (default 0)
+; 	DMA_RAM_SAFE_USE (default 1&(DMA_RAM_SAFE=0))
+; 	DMA_128KB_SAFE (default 0)
+; 	DMA_VINT_SAFE (default 0)
+;
+; With the default settings, runs in:
+; * 48(11/0) cycles if queue is full (DMA discarded)
+; * 184(29/9) cycles otherwise (DMA queued)
+;
+; With DMA_128KB_SAFE = 1, runs in:
+; * 48(11/0) cycles if queue is full at the start (DMA discarded)
+; * 200(32/9) cycles if the DMA does not cross a 128kB boundary (DMA queued)
+; * 226(38/9) cycles if the DMA crosses a 128kB boundary, and the first piece
+;   fills the queue (second piece is discarded)
+; * 338(56/17) cycles if the DMA crosses a 128kB boundary, and the queue has
+;   space for both pieces (both pieces queued)
+;
+; Setting DMA_VINT_SAFE to 1 adds 46(6/1) cycles to all times.
+;
+; Setting DMA_SRC_BYTES to 0 reduces all times by 10(1/0) cycles,
+; but only if the DMA is not entirely discarded. However, all callers must be
+; edited to make sure the adresss given is in the correct form; you can use
+; the dmaSource function for that, which also sanitizes RAM addresses.
+;
+; Setting DMA_RAM_SAFE to 1, or DMA_RAM_SAFE_USE to 0,
+; reduces all times by 14(2/0) cycles, but only if the DMA is not entirely
+; discarded. However, all callers must be edited to make sure the adresss given
+; in the correct form.
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	d1.l - Source address
+;	d2.w - Destination address
+;	d3.w - Transfer size
+; ---------------------------------------------------------------------------
+
+QueueDMA:
+	if DMA_VINT_SAFE=1
+		move.w	sr,-(sp)			; Save current interrupt mask
+		move	#$2700,sr			; Mask off interrupts
+	endif	; DMA_VINT_SAFE=1
+	movea.w	dma_queue_cur.w,a1
+	cmpa.w	#dma_queue_cur,a1
+	beq.s	.done					; Return if there's no more room in the buffer
+
+	if DMA_SRC_BYTES<>0
+		lsr.l	#1,d1				; Source address is in words for the VDP registers
+	endif
+	if DMA_RAM_SAFE_USE<>0
+		bclr.l	#23,d1				; Make sure bit 23 is clear (68k->VDP DMA flag)
+	endif	; DMA_RAM_SAFE_USE
+	movep.l	d1,dmaSlotSrc(a1)			; Write source address; the useless top byte will be overwritten later
+	moveq	#0,d0					; We need a zero on d0
+
+	if DMA_128KB_SAFE<>0
+		; Detect if transfer crosses 128KB boundary
+		; Using sub+sub instead of move+add handles the following edge cases:
+		; (1) d3.w = 0 => 128kB transfer
+		;   (a) d1.w = 0 => no carry, don't split the DMA
+		;   (b) d1.w != 0 => carry, need to split the DMA
+		; (2) d3.w != 0
+		;   (a) if there is carry on d1.w + d3.w
+		;     (* ) if d1.w + d3.w = 0 => transfer comes entirely from current 128kB block, don't split the DMA
+		;     (**) if d1.w + d3.w != 0 => need to split the DMA
+		;   (b) if there is no carry on d1.w + d3.w => don't split the DMA
+		; The reason this works is that carry on d1.w + d3.w means that
+		; d1.w + d3.w >= $10000, whereas carry on (-d3.w) - (d1.w) means that
+		; d1.w + d3.w > $10000.
+		sub.w	d3,d0				; Using sub instead of move and add allows checking edge cases
+		sub.w	d1,d0				; Does the transfer cross over to the next 128kB block?
+		bcs.s	.DblTransfer			; Branch if yes
+	endif	; DMA_128KB_SAFE
+	; It does not cross a 128kB boundary. So just finish writing it.
+	movep.w	d3,dmaSlotSize(a1)			; Write DMA length, overwriting useless top byte of source address
+
+.FinishXfer:
+	; Command to specify destination address and begin DMA
+	move.w	d2,d0					; Use the fact that top word of d0 is zero to avoid clearing on VDPCMDR
+	VDPCMDR	d0,VRAM,DMA,0				; Convert destination address to VDP DMA command
+	lea	dmaSlotCmd(a1),a1			; Seek to correct RAM address to store VDP DMA command
+	move.l	d0,(a1)+				; Write VDP DMA command for destination address
+	move.w	a1,dma_queue_cur.w			; Write next queue slot
+
+.done:
+	if DMA_VINT_SAFE=1
+		move.w	(sp)+,sr			; Restore interrupts to previous state
+	endif	; DMA_VINT_SAFE=1
+	rts
+
+; ---------------------------------------------------------------------------
+
+	if DMA_128KB_SAFE<>0
+.DblTransfer:
+		; We need to split the DMA into two parts, since it crosses a 128kB block
+		add.w	d3,d0				; Set d0 to the number of words until end of current 128kB block
+		movep.w	d0,dmaSlotSize(a1)		; Write DMA length of first part, overwriting useless top byte of source addres
+
+							; Does the queue have enough space for both parts?
+		cmpa.w	#dma_queue_cur-dmaSlotLen,a1
+		beq.s	.FinishXfer			; Branch if not
+
+		; Get second transfer's source, destination, and length
+		sub.w	d0,d3				; Set d3 to the number of words remaining
+		add.l	d0,d1				; Offset the source address of the second part by the length of the first part
+		add.w	d0,d0				; Convert to number of bytes
+		add.w	d2,d0				; Set d0 to the VRAM destination of the second part
+
+		; If we know top word of d2 is clear, the following VDPCMDR can be set to not
+		; clear it. There is, unfortunately, no faster way to clear it than this.
+		VDPCMDR	d2,VRAM,DMA,1			; Convert destination address of first part to VDP DMA command
+		move.l	d2,dmaSlotCmd(a1)		; Write VDP DMA command for destination address of first part
+
+		; Do second transfer
+							; Write source address of second part; useless top byte will be overwritten later
+		movep.l	d1,dmaSlotLen+dmaSlotSrc(a1)
+							; Write DMA length of second part, overwriting useless top byte of source addres
+		movep.w	d3,dmaSlotLen+dmaSlotSize(a1)
+
+		; Command to specify destination address and begin DMA
+		VDPCMDR	d0,VRAM,DMA,0			; Convert destination address to VDP DMA command; we know top half of d0 is zero
+		lea	dmaSlotLen+dmaSlotCmd(a1),a1	; Seek to correct RAM address to store VDP DMA command of second part
+		move.l	d0,(a1)+			; Write VDP DMA command for destination address of second part
+
+		move.w	a1,dma_queue_cur.w		; Write next queue slot
+		if DMA_VINT_SAFE=1
+			move.w	(sp)+,sr		; Restore interrupts to previous state
+		endif	; DMA_VINT_SAFE=1
+		rts
+	endif		; DMA_128KB_SAFE
+
+; ---------------------------------------------------------------------------
+; Flush DMA queue
+; ---------------------------------------------------------------------------
+
+FlushDMAQueue:
+	move.w	dma_queue_cur.w,d0
+	subi.w	#dma_queue,d0
+	jmp	.JumpTable(pc,d0.w)
+
+; ---------------------------------------------------------------------------
+
+.JumpTable:
+	rts
+	rept 6
+		trap	#0				; Just in case
+	endr
+
+; ---------------------------------------------------------------------------
+
+	.c: = 1
+	rept DMASLOT_COUNT
+		lea	VDPCTRL,a5
+		lea	dma_queue.w,a1
+		if .c<>DMASLOT_COUNT
+			bra.w	.Jump0-(.c*8)
+		endif
+		.c: = .c+1
+	endr
+
+; ---------------------------------------------------------------------------
+
+	rept DMASLOT_COUNT
+		move.l	(a1)+,(a5)			; Transfer length
+		move.l	(a1)+,(a5)			; Source address high
+		move.l	(a1)+,(a5)			; Source address low + destination high
+		move.w	(a1)+,(a5)			; Destination low, trigger DMA
+	endr
+
+.Jump0:
+	RESETDMA
+	rts
+
+; ---------------------------------------------------------------------------
+; Pre-initializes the DMA queue with VDP register numbers in alternating
+; bytes.
+; Must be called before the queue is used, and the queue expects that only it
+; write to this region of RAM.
+; ---------------------------------------------------------------------------
+
+InitDMAQueue:
+	lea	dma_queue.w,a0
+	moveq	#$FFFFFF94,d0				; Fast-store $94 (sign-extended) in d0
+	move.l	#$93979695,d1
+
+	.c: = 0
+	rept DMASLOT_COUNT
+		move.b	d0,.c+dmaSlotReg94(a0)
+		movep.l	d1,.c+dmaSlotReg93(a0)
+		.c: = .c+dmaSlotLen
+	endr
+
+	RESETDMA
+	rts
+
+; ---------------------------------------------------------------------------

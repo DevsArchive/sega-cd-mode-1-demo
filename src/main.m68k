@@ -1,0 +1,41 @@
+; ---------------------------------------------------------------------------
+; Mode 1 Demo
+; By Devon 2022
+; ---------------------------------------------------------------------------
+; Main source
+; ---------------------------------------------------------------------------
+
+Main:
+	tst.b	mcd_found.w				; Was the Mega CD found?
+	bne.w	GfxDemo					; If so, branch
+	
+	move.l	#$C0020000,VDPCTRL			; Set font color
+	move.w	#$EEE,VDPDATA
+
+	move.l	#$44000000,VDPCTRL			; Load font into VRAM
+	moveq	#1,d0
+	bsr.w	LoadDebugFont
+
+	lea	.MCDNotFoundMsg(pc),a0			; Draw message
+	move.l	#$440A0003,d0
+	moveq	#0,d1
+	bsr.w	DrawText
+
+	move.w	#$8174,VDPCTRL				; Enable screen
+	stop	#$2700					; Halt
+
+; ---------------------------------------------------------------------------
+
+.MCDNotFoundMsg:
+	dc.b	"This test requires the Mega CD.", -1, -1
+	dc.b	"        Program halted.", 0
+	even
+
+; ---------------------------------------------------------------------------
+; Demo program
+; ---------------------------------------------------------------------------
+
+	include	"demo/demo.m68k"
+	;include	"demo/test.m68k"
+
+; ---------------------------------------------------------------------------

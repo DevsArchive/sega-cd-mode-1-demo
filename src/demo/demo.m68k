@@ -1,0 +1,313 @@
+; ---------------------------------------------------------------------------
+; Mode 1 Demo
+; By Devon 2022
+; ---------------------------------------------------------------------------
+; Demo program
+; ---------------------------------------------------------------------------
+
+	include	"subcpu/gfxdef.i"
+
+; -------------------------------------------------------------------------
+; Variables
+; -------------------------------------------------------------------------
+
+	rsset	local_vars
+scale		rs.w	1			; Scale value
+gfx_done	rs.b	1			; Graphics done flag
+buffer_id	rs.b	1			; Buffer ID
+frame_count	rs.w	1			; Frame count
+
+camera_x	rs.w	1			; Camera X
+camera_y	rs.w	1			; Camera Y
+camera_z	rs.w	1			; Camera Z
+camera_angle	rs.w	1			; Camera angle
+
+is_kega		rs.b	1			; Kega Fusion flag
+
+; -------------------------------------------------------------------------
+; Demo routine
+; -------------------------------------------------------------------------
+
+GfxDemo:
+	move	VDPDEBUG,d0			; Check if Kega Fusion
+	cmpi.w	#$FFFF,d0
+	seq	is_kega.w
+
+	movea.l	mcd_sub_bios.w,a0		; Initialize Sub CPU
+	lea	SubCPUPrg(pc),a1
+	move.l	#SubCPUPrg_End-SubCPUPrg,d0
+	bsr.w	InitSubCPU
+
+	move.w	#$4EF9,vblank_int.w		; Set up dummy V-INT
+	move.l	#VInt_Dummy,vblank_int+2.w
+	move.w	#$8134,VDPCTRL			; Disable display and enable V-INT
+	move	#$2000,sr			; Enable interrupts
+
+	move.b	#"R",MAINFLAG			; Tell Sub CPU that security code is done running
+
+.Wait:
+	cmpi.b	#"G",SUBFLAG			; Wait for the Sub CPU to finish initializing
+	bne.s	.Wait
+
+	clr.b	MAINFLAG			; Mark as ready for commands
+
+.Wait2:
+	cmpi.b	#"R",SUBFLAG			; Wait for the Sub CPU to get ready to send commands
+	bne.s	.Wait2
+	
+	move	#$2700,sr			; Disable interrupts
+	move.l	#VInt_Gfx,vblank_int+2.w	; Set vertical interrupt
+
+	move.w	#$3000,camera_x.w		; Setu p camera
+	move.w	#$4000,camera_y.w
+	move.w	#$3000,camera_z.w
+
+	move.w	#$8200|($E000/$400),VDPCTRL	; Set plane A to same address as plane B
+	move.w	#$8500|($F800/$200),VDPCTRL	; Set sprite table to $F800
+	move.w	#$8B00,VDPCTRL			; Scroll by screen
+	move.w	#$8C00,VDPCTRL			; H32 mode
+	move.w	#$8D00|($FC00/$400),VDPCTRL	; Set HScroll table to $FC00
+
+	lea	GfxStamps,a0			; Load stamp data
+	lea	WORDRAM+STAMP_DATA,a1
+	bsr.w	CompDec
+	
+	lea	GfxStampMap,a0			; Load stamp map
+	lea	WORDRAM+STAMP_MAP,a1
+	bsr.w	CompDec
+
+	lea	GfxPalette,a0			; Load palette
+	lea	palette.w,a1
+	moveq	#$20/4-1,d0
+
+.LoadPal:
+	move.l	(a0)+,(a1)+
+	dbf	d0,.LoadPal
+
+	move.l	#$67800003,d0			; Load tilemap
+	moveq	#1,d4				; (Tiles are arranged vertically)
+	moveq	#2-1,d5
+	move.w	#$8F80,VDPCTRL
+
+.LoadMap:
+	moveq	#IMG_WIDTH/8-1,d1
+	moveq	#IMG_HEIGHT/8-1,d2
+
+.MapCol:
+	move.l	d0,VDPCTRL
+	add.l	#$20000,d0
+	move.w	d2,d3
+
+.MapTile:
+	move.w	d4,VDPDATA
+	addq.w	#1,d4
+	dbf	d3,.MapTile
+	dbf	d1,.MapCol
+
+	move.l	#$67C00003,d0
+	dbf	d5,.LoadMap
+	move.w	#$8F02,VDPCTRL
+
+	move.l	#$40000010,VDPCTRL		; Move to top of map
+	move.l	#$00080008,VDPDATA
+
+; -------------------------------------------------------------------------
+
+.Loop:
+	bsr.w	VSync				; VSync
+
+	addi.w	#$20,camera_x.w			; Move camera
+	addi.w	#$20,camera_z.w
+	addq.w	#2,camera_angle.w
+
+	move.w	camera_x.w,d0			; Start rendering
+	move.w	camera_y.w,d1
+	move.w	camera_z.w,d2
+	move.w	camera_angle.w,d3
+	bsr.s	GfxRender
+
+.WaitGfx:
+	bsr.s	CheckGfx			; Wait until graphics are done
+	bne.s	.WaitGfx
+	move.b	#1,gfx_done.w			; Mark graphics as done
+
+	bra.w	.Loop				; Loop
+
+; -------------------------------------------------------------------------
+; Start graphics rendering
+; -------------------------------------------------------------------------
+; PARAMETERS:
+;	d0.w - Camera X
+;	d1.w - Camera Y
+;	d2.w - Camera Z
+;	d3.w - Camera angle
+; -------------------------------------------------------------------------
+
+GfxRender:
+	move.w	d0,MAINCOM0			; Start graphics rendering
+	move.w	d1,MAINCOM1
+	move.w	d2,MAINCOM2
+	move.w	d3,MAINCOM3
+	moveq	#1,d0
+	bsr.w	SubCPUCmd
+	bra.w	SubCPUCmd_Wait
+
+; -------------------------------------------------------------------------
+; Check graphics status
+; -------------------------------------------------------------------------
+; RETURNS:
+;	eq/ne	- Inactive/Busy
+; -------------------------------------------------------------------------
+
+CheckGfx:
+	moveq	#2,d0				; Check graphics status
+	bsr.w	SubCPUCmd
+	bsr.w	SubCPUCmd_Wait
+	tst.w	SUBCOM0
+	rts
+
+; -------------------------------------------------------------------------
+; Dummy vertical interrupt
+; -------------------------------------------------------------------------
+
+VInt_Dummy:
+	bset	#0,MCDINT2			; Send interrupt request
+	rte
+
+; -------------------------------------------------------------------------
+; Vertical interrupt
+; -------------------------------------------------------------------------
+
+VInt_Gfx:
+	bset	#0,MCDINT2			; Send interrupt request
+	
+	move	#$2700,sr			; Disable interrupts
+	movem.l	d0-a6,-(sp)			; Push all registers
+	
+	Z80STOP					; Stop Z80
+	
+	lea	VDPCTRL,a6			; VDP control
+	DMA68K	palette,0,$80,CRAM,a6		; Transfer palette data
+	
+	bclr	#0,gfx_done.w			; Transfer graphics data
+	beq.w	.NoGfx
+
+	tst.b	is_kega.w
+	beq.s	.NotKega
+	
+	tst.b	buffer_id.w
+	beq.s	.KegaBuffer0
+	DMA68K	WORDRAM+IMG_BUFFER+2-$400000,$20,IMG_SIZE,VRAM,a6
+	VDPCMD	move.l,$20,VRAM,WRITE,(a6)
+	move.l	WORDRAM+IMG_BUFFER,-4(a6)
+	bra.w	.GfxDone
+
+.KegaBuffer0:
+	DMA68K	WORDRAM+IMG_BUFFER+2-$400000,$20+IMG_SIZE,IMG_SIZE,VRAM,a6
+	VDPCMD	move.l,$20+IMG_SIZE,VRAM,WRITE,(a6)
+	move.l	WORDRAM+IMG_BUFFER,-4(a6)
+	bra.s	.GfxDone
+
+.NotKega:
+	tst.b	buffer_id.w
+	beq.s	.NotKegaBuffer0
+	DMA68K	WORDRAM+IMG_BUFFER+2,$20,IMG_SIZE,VRAM,a6
+	VDPCMD	move.l,$20,VRAM,WRITE,(a6)
+	move.l	WORDRAM+IMG_BUFFER,-4(a6)
+	bra.s	.GfxDone
+
+.NotKegaBuffer0:
+	DMA68K	WORDRAM+IMG_BUFFER+2,$20+IMG_SIZE,IMG_SIZE,VRAM,a6
+	VDPCMD	move.l,$20+IMG_SIZE,VRAM,WRITE,(a6)
+	move.l	WORDRAM+IMG_BUFFER,-4(a6)
+
+.GfxDone:
+	not.b	buffer_id.w			; Swap buffer
+	bne.s	.HScrollBuf1
+	move.l	#$7C000003,(a6)
+	move.l	#$00000000,-4(a6)
+	bra.s	.Display
+
+.HScrollBuf1:
+	move.l	#$7C000003,(a6)
+	move.l	#$01000100,-4(a6)
+
+.Display:
+	move.w	#$8174,(a6)			; Enable display
+
+.NoGfx:
+	Z80START				; Start Z80
+
+	addq.w	#1,frame_count.w		; Increment frame count
+	movem.l	(sp)+,d0-a6			; Pop all registers
+	rte
+
+; -------------------------------------------------------------------------
+; VSync
+; -------------------------------------------------------------------------
+
+VSync:
+	move	#$2000,sr			; Enable interrupts
+	move.w	frame_count.w,d0		; Get frame count
+
+.Wait:
+	cmp.w	frame_count.w,d0		; Did it change?
+	beq.s	.Wait				; If not, wait
+	rts
+
+; -------------------------------------------------------------------------
+; Send a command to the Sub CPU
+; -------------------------------------------------------------------------
+; PARAMETERS
+;	d0.b - Command ID
+; -------------------------------------------------------------------------
+
+SubCPUCmd:
+	bset	#1,MCDMEMMODE			; Give Word RAM access to the Sub CPU
+	beq.s	SubCPUCmd
+
+	move.b	d0,MAINFLAG			; Set command
+
+.WaitSub:
+	cmpi.b	#"B",SUBFLAG			; Did the Sub CPU get it?
+	bne.s	.WaitSub			; If so, branch
+
+	clr.b	MAINFLAG			; Reset command
+	rts
+
+; -------------------------------------------------------------------------
+; Wait for a Sub CPU command to finish
+; -------------------------------------------------------------------------
+
+SubCPUCmd_Wait:
+	cmpi.b	#"R",SUBFLAG			; Is the Sub CPU finished?
+	bne.s	SubCPUCmd_Wait			; If not, branch
+	rts
+
+; -------------------------------------------------------------------------
+; Sub CPU program
+; -------------------------------------------------------------------------
+
+SubCPUPrg:
+	incbin	"subcpu/_out/sp.bin"
+SubCPUPrg_End:
+	even
+
+; -------------------------------------------------------------------------
+; Data
+; -------------------------------------------------------------------------
+
+GfxStamps:
+	incbin	"demo/data/stamps.comp"
+	even
+
+GfxStampMap:
+	incbin	"demo/data/stampmap.comp"
+GfxStampMap_End:
+	even
+
+GfxPalette:
+	incbin	"demo/data/palette.bin"
+	even
+
+; -------------------------------------------------------------------------
