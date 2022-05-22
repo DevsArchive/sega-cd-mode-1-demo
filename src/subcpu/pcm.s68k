@@ -28,13 +28,17 @@ pcmInsTable	rs.l	1				; Instrument table address
 pcmDuration	rs.b	1				; Note duration
 pcmSavedDur	rs.b	1				; Saved note duration
 
+pcmFreq		rs.l	1				; Frequency
+pcmDetune	rs.l	1				; Detune
+pcmNote		rs.b	1				; Note
+
+pcmPortaLen	rs.b	1				; Portamento length
+pcmPortaAccum	rs.l	1				; Portamento accumulator
+pcmPortaFreq	rs.l	1				; Portamento target frequency
+
 pcmVolume	rs.b	1				; Volume
 pcmPanning	rs.b	1				; Panning
-pcmFreq		rs.w	1				; Frequency
-pcmNote		rs.b	1				; Note ID
-
 pcmIns		rs.b	1				; Instrument ID
-pcmInsTrns	rs.b	1				; Instrument transposition
 
 pcmEnvMode	rs.b	1				; Envelope mode
 pcmEnvVolume	rs.b	1				; Envelope volume level
@@ -49,6 +53,7 @@ pcmSampleStart	rs.l	1				; Sample start address
 pcmSampleLoop	rs.l	1				; Sample loop position
 pcmSampleSize	rs.l	1				; Size of sample
 pcmSamplesLeft	rs.l	1				; Samples left to stream
+pcmSampleDetune	rs.l	1				; Sample detune
 pcmStreamBuf	rs.l	1				; Stream buffer address
 pcmLastAddr	rs.w	1				; Last wave RAM playback position
 pcmBytesLeft	rs.w	1				; Bytes left in bank
@@ -63,9 +68,9 @@ pcmChnSize	rs.b	0				; Size of structure
 PCMFSMPBANK	rs.b	1				; Sample wave bank
 PCMFSMPSET	rs.b	1				; Sample setup
 PCMFSMPSTRM	rs.b	1				; Sample stream
+PCMFREST	rs.b	1				; Rest flag
 PCMFLEGATO	rs.b	1				; Legato
-		rs.b	1
-		rs.b	1
+PCMFPORTA	rs.b	1				; Portamento
 		rs.b	1
 PCMFPLAY	rs.b	1				; Playing
 
@@ -77,7 +82,7 @@ PCMFPLAY	rs.b	1				; Playing
 pcmISmpAddr	rs.l	1				; Sample data address
 pcmISmpLen	rs.l	1				; Size of sample data
 pcmISmpLoop	rs.l	1				; Loop point
-pcmISmpTrns	rs.b	1				; Transposition
+pcmISmpDetune	rs.l	1				; Transposition
 
 pcmISmpAtk	rs.b	1				; Attack rate
 pcmISmpDec	rs.b	1				; Decay rate
@@ -88,6 +93,7 @@ pcmISmpRel	rs.b	1				; Release rate
 pcmISmpNStart	rs.b	1				; Note range start
 pcmISmpNEnd	rs.b	1				; Note range end
 
+		rs.b	__rs&1
 pcmISmpSize	rs.b	0				; size of structure
 
 ; ---------------------------------------------------------------------------
@@ -154,7 +160,8 @@ InitPCM:
 	move.l	d2,pcmTrkAddr(a0)			; Set track data address
 	move.l	d0,pcmInsTable(a0)			; Set instrument table
 	
-	move.b	#1<<PCMFPLAY,pcmFlags(a0)		; Set flags
+							; Set flags
+	move.b	#(1<<PCMFREST)|(1<<PCMFPLAY),pcmFlags(a0)
 	move.b	#NREST,pcmNote(a0)			; Set rest note
 
 	dbf	d4,.InitTracks				; Loop until finished
@@ -248,15 +255,69 @@ UpdatePCMChannel:
 	moveq	#0,d0					; Get current note
 	move.b	pcmNote(a0),d0
 	subi.b	#PCMNSTART,d0
-	beq.s	.RestNote				; If it's a rest note, branch
+	beq.w	.RestNote				; If it's a rest note, branch
 	cmpi.b	#NCUT-PCMNSTART,d0			; Is it a cut note?
-	beq.s	.CutNote				; If so, branch
+	beq.w	.CutNote				; If so, branch
 
 ; ---------------------------------------------------------------------------
 
 .RegularNote:
+	subq.b	#NA0-PCMNSTART,d0			; Get frequency
+	
+	bclr	#PCMFREST,pcmFlags(a0)			; Clear rest flag
+	bne.s	.SetFreq				; If it was set before, branch
+	btst	#PCMFPORTA,pcmFlags(a0)			; Is portamento active?
+	beq.s	.SetFreq				; If not, branch
 	bclr	#PCMFLEGATO,pcmFlags(a0)		; Clear legato flag
-	bne.s	.GetFreq				; If it was set, branch
+
+	move.w	d0,pcmPortaFreq(a0)			; Set target portamento frequency
+	clr.w	pcmPortaFreq+2(a0)
+	
+	moveq	#0,d1					; Get portamento length
+	move.b	pcmPortaLen(a0),d1
+	beq.w	.KeyOn					; If we aren't using the length, branch
+	
+	moveq	#0,d3					; Number of shifts made
+	move.l	pcmPortaFreq(a0),d2			; Get frequency difference
+	sub.l	pcmFreq(a0),d2
+	bpl.s	.FixPortaLen
+	neg.l	d2
+
+.FixPortaLen:
+	; This exists because m68k division can only produce a 16-bit result. If the
+	; result is too large, it will not be saved. We shift it down until it
+	; can at least be divided by 2. A little bit of precision is lost when it
+	; gets shifted down, but  there's not really much else I can do about this
+	; whole thing.
+	cmpi.b	#1,d1					; Is the length 1?
+	beq.s	.SetPortaAccum				; If so, branch
+
+.FixPortaLenLoop:
+	cmpi.l	#$20000,d2				; Is the value too large for even a division by 2?
+	bcs.s	.DividePortaLen				; If not, branch
+	lsr.l	#1,d2					; Shift value down
+	addq.b	#1,d3					; Increment shift count
+	bra.s	.FixPortaLenLoop			; Loop until value can fit nicely in a division
+
+.DividePortaLen:
+	divu.w	d1,d2					; Divide distance by portamento length
+	swap	d2
+	clr.w	d2
+	swap	d2
+	lsl.l	d3,d2					; Shift result back
+
+.SetPortaAccum:
+	move.l	d2,pcmPortaAccum(a0)			; Set portamento accumulator
+	
+	bra.s	.KeyOn					; Key on
+	
+.SetFreq:
+	move.w	d0,pcmFreq(a0)				; Set note frequency
+	clr.w	pcmFreq+2(a0)
+
+.CheckLegato:
+	bclr	#PCMFLEGATO,pcmFlags(a0)		; Clear legato flag
+	bne.s	.KeyOn					; If it was set, branch
 	bsr.w	KeyOffPCM				; Key off
 	
 	movea.l	pcmInsTable(a0),a1			; Get instrument table entry
@@ -283,66 +344,41 @@ UpdatePCMChannel:
 	move.l	(a1)+,pcmSampleStart(a0)		; Sample start
 	move.l	(a1)+,pcmSampleSize(a0)			; Sample size
 	move.l	(a1)+,pcmSampleLoop(a0)			; Sample loop
-	move.b	(a1)+,pcmInsTrns(a0)			; Sample transposition
-	move.b	(a1)+,pcmAttackRate(a0)			; Envelope parameters
-	move.l	(a1)+,pcmDecayRate(a0)
+	move.l	(a1)+,pcmSampleDetune(a0)		; Sample detune
+	move.l	(a1)+,pcmAttackRate(a0)			; Envelope parameters
+	move.b	(a1)+,pcmReleaseRate(a0)
 
 	bclr	#PCMFSMPSET,pcmFlags(a0)		; Clear sample setup flag
 	clr.b	pcmEnvMode(a0)				; Reset envelope
 	clr.b	pcmEnvVolume(a0)
 
-.GetFreq:
-	lea	PCMFrequencies(pc),a2			; Get frequency
-	move.b	pcmInsTrns(a0),d1
-	ext.w	d1
-	add.w	d1,d0
-	add.w	d0,d0
-	move.w	((PCMNSTART-NA0)*2)(a2,d0.w),pcmFreq(a0)
-
+.KeyOn:
 	bsr.s	.UpdateNote				; Update note
 	bra.w	KeyOnPCM				; Key on
 
 ; ---------------------------------------------------------------------------
 
 .RestNote:
+	bset	#PCMFREST,pcmFlags(a0)			; Set rest flag
 	move.b	#8,pcmEnvMode(a0)			; Set to release mode
 	bra.s	.UpdateNote				; Update note
 
 ; ---------------------------------------------------------------------------
 
 .CutNote:
+	bset	#PCMFREST,pcmFlags(a0)			; Set rest flag
 	bsr.w	KeyOffPCM				; Key off
 
 ; ---------------------------------------------------------------------------
 
 .UpdateNote:
-	bsr.w	ProcPCMEnvelope				; Update PCM envelope
+	bsr.w	UpdatePCMPorta				; Update portamento
+	bsr.w	UpdatePCMADSREnv			; Update ADSR envelope
 	bra.w	UpdatePCMChnData			; Update data
 
 .End:
 	rts
-
-; ---------------------------------------------------------------------------
-; Frequency table
-; ---------------------------------------------------------------------------
-
-	;	A      A#/Bb  B      C      C#/Db  D      D#/Eb  E      F      F#/Gb  G      G#/Ab
-	dc.w	$0010, $0011, $0012, $0013, $0014, $0015, $0017, $0018, $0019, $001B, $001D, $001E
-	dc.w	$0020, $0022, $0024, $0026, $0028, $002B, $002D, $0030, $0033, $0036, $0039, $003C
-
-PCMFrequencies:
-	dc.w	$0040, $0044, $0048, $004C, $0051, $0055, $005B, $0060, $0066, $006C, $0072, $0079
-	dc.w	$0080, $0088, $0090, $0098, $00A1, $00AB, $00B5, $00C0, $00CB, $00D7, $00E4, $00F2
-	dc.w	$0100, $010F, $011F, $0130, $0143, $0156, $016A, $0180, $0196, $01AF, $01C8, $01E3
-	dc.w	$0200, $021E, $023F, $0261, $0285, $02AB, $02D4, $02FF, $032D, $035D, $0390, $03C7
-	dc.w	$0400, $043D, $047D, $04C2, $050A, $0557, $05A8, $05FE, $0659, $06BA, $0721, $078D
-	dc.w	$0800, $087A, $08FB, $0983, $0A14, $0AAE, $0B50, $0BFD, $0CB3, $0D74, $0E41, $0F1A
-	dc.w	$1000, $10F4, $11F6, $1307, $1429, $155C, $16A1, $17F9, $1966, $1AE9, $1C82, $1E34
-	dc.w	$2000, $21E7, $23EB, $260E, $2851, $2AB7, $2D41, $2FF2, $32CC, $35D1, $3904, $3C68
-
-	dc.w	$4000, $43CE, $47D6, $4C1C, $50A3, $556E, $5A82, $5FE4, $6598, $6BA2, $7209, $78D1
-	dc.w	$8000, $879C, $8FAD, $9838, $A145, $AADC, $B505, $BFC9, $CB30, $D745, $E412, $F1A2
-
+	
 ; ---------------------------------------------------------------------------
 ; Stop all channels
 ; ---------------------------------------------------------------------------
@@ -402,13 +438,50 @@ KeyOffPCM:
 	rts
 
 ; ---------------------------------------------------------------------------
-; Process channel envelope
+; Update channel portamento
 ; ---------------------------------------------------------------------------
 ; PARAMETERS:
 ;	a0.l - PCM channel data structure
 ; ---------------------------------------------------------------------------
 
-ProcPCMEnvelope:
+UpdatePCMPorta:
+	btst	#PCMFPORTA,pcmFlags(a0)			; Is portamento active?
+	beq.s	.End					; If not, branch
+	
+	move.l	pcmFreq(a0),d0				; Get current frequency
+	move.l	pcmPortaFreq(a0),d1			; Get distance from target frequency
+	sub.l	d0,d1
+	beq.s	.End					; If we are at the target frequency, branch
+	bpl.s	.AddAccum				; If it's positive, branch
+
+.SubAccum:
+	sub.l	pcmPortaAccum(a0),d0			; Subtract accumulator
+	cmp.l	pcmPortaFreq(a0),d0			; Has it reached the target frequency?
+	bgt.s	.UpdateFreq				; If not, branch
+	bra.s	.CapFreq				; If so, cap it
+
+.AddAccum:
+	add.l	pcmPortaAccum(a0),d0			; Add accumulator
+	cmp.l	pcmPortaFreq(a0),d0			; Has it reached the target frequency?
+	blt.s	.UpdateFreq				; If not, branch
+	
+.CapFreq:
+	move.l	pcmPortaFreq(a0),d0			; Cap at target frequency
+
+.UpdateFreq:
+	move.l	d0,pcmFreq(a0)				; Update frequency
+
+.End:
+	rts
+
+; ---------------------------------------------------------------------------
+; Update channel ADSR envelope
+; ---------------------------------------------------------------------------
+; PARAMETERS:
+;	a0.l - PCM channel data structure
+; ---------------------------------------------------------------------------
+
+UpdatePCMADSREnv:
 	moveq	#0,d0					; Go to envelope mode
 	move.b	pcmEnvMode(a0),d0
 	jmp	.Modes(pc,d0.w)
@@ -539,6 +612,27 @@ PCMCmd_Instrument:
 	rts
 
 ; ---------------------------------------------------------------------------
+; Frequency table
+; ---------------------------------------------------------------------------
+
+	;	A      A#/Bb  B      C      C#/Db  D      D#/Eb  E      F      F#/Gb  G      G#/Ab
+	dc.w	$0010, $0011, $0012, $0013, $0014, $0015, $0017, $0018, $0019, $001B, $001D, $001E
+	dc.w	$0020, $0022, $0024, $0026, $0028, $002B, $002D, $0030, $0033, $0036, $0039, $003C
+
+PCMFrequencies:
+	dc.w	$0040, $0044, $0048, $004C, $0051, $0055, $005B, $0060, $0066, $006C, $0072, $0079
+	dc.w	$0080, $0088, $0090, $0098, $00A1, $00AB, $00B5, $00C0, $00CB, $00D7, $00E4, $00F2
+	dc.w	$0100, $010F, $011F, $0130, $0143, $0156, $016A, $0180, $0196, $01AF, $01C8, $01E3
+	dc.w	$0200, $021E, $023F, $0261, $0285, $02AB, $02D4, $02FF, $032D, $035D, $0390, $03C7
+	dc.w	$0400, $043D, $047D, $04C2, $050A, $0557, $05A8, $05FE, $0659, $06BA, $0721, $078D
+	dc.w	$0800, $087A, $08FB, $0983, $0A14, $0AAE, $0B50, $0BFD, $0CB3, $0D74, $0E41, $0F1A
+	dc.w	$1000, $10F4, $11F6, $1307, $1429, $155C, $16A1, $17F9, $1966, $1AE9, $1C82, $1E34
+	dc.w	$2000, $21E7, $23EB, $260E, $2851, $2AB7, $2D41, $2FF2, $32CC, $35D1, $3904, $3C68
+
+	dc.w	$4000, $43CE, $47D6, $4C1C, $50A3, $556E, $5A82, $5FE4, $6598, $6BA2, $7209, $78D1
+	dc.w	$8000, $879C, $8FAD, $9838, $A145, $AADC, $B505, $BFC9, $CB30, $D745, $E412, $F1A2
+
+; ---------------------------------------------------------------------------
 ; Update PCM samples
 ; ---------------------------------------------------------------------------
 
@@ -585,8 +679,27 @@ UpdatePCMChnData:
 
 	PCMREG	(sp)+,PCMENV,1,d0			; Set volume
 	PCMREG	pcmPanning(a0),PCMPAN,1,d0		; Set panning
-	PCMREG	pcmFreq+1(a0),PCMFDL,1,d0		; Set frequency
-	PCMREG	pcmFreq(a0),PCMFDH,1,d0
+	
+	move.l	pcmFreq(a0),d0				; Get calculated frequency
+	add.l	pcmSampleDetune(a0),d0
+	add.l	pcmDetune(a0),d0
+	
+	lea	PCMFrequencies(pc),a1			; Get raw base frequency
+	swap	d0
+	add.w	d0,d0
+	lea	(a1,d0.w),a1
+	move.w	(a1)+,d1
+	swap	d0
+	
+	move.w	(a1),d2					; Get raw detune
+	sub.w	d1,d2
+	mulu.w	d2,d0
+	swap	d0
+	
+	add.w	d0,d1					; Set frequency
+	move.w	d1,-(sp)
+	PCMREG	d1,PCMFDL,1,d0
+	PCMREG	(sp)+,PCMFDH,1,d0
 
 ; ---------------------------------------------------------------------------
 
@@ -723,6 +836,9 @@ UpdatePCMChnData:
 	lsr.b	#4,d1
 	andi.b	#1,d1
 	andi.b	#1<<PCMFSMPBANK,d3
+	if PCMFSMPBANK<>0
+		lsr.b	#PCMFSMPBANK,d3
+	endif
 	eor.b	d3,d1
 	beq.s	.End					; If not, branch
 
@@ -901,29 +1017,29 @@ TestTrack_Instruments:
 .0:
 	PCMINSDAT	TestSample, &
 			TestSample_End-TestSample, TestSample_End-TestSample-$21, &
-			NA0, NGS8, 0, &
+			NA0, NGS8, NA4, 0, &
 			$FF, $01, $E0, $01, $08
 	PCMINSEND
 
 .1:
 	PCMINSDAT	PadSample, &
-			PadSample_End-PadSample, 15431, &
-			NA0, NGS8, 0, &
+			PadSample_End-PadSample, 0, &
+			NA0, NGS8, NA4, 0, &
 			$10, $02, $00, $00, $FF
 	PCMINSEND
 
 .2:
 	PCMINSDAT	KickSample, &
 			KickSample_End-KickSample, KickSample_End-KickSample-$21, &
-			NA4, NA4, 0, &
+			NA4, NA4, NA4, 0, &
 			$FF, $00, $00, $00, $FF
 	PCMINSDAT	SnareSample, &
 			SnareSample_End-SnareSample, SnareSample_End-SnareSample-$21, &
-			NAS4, NAS4, -1, &
+			NAS4, NAS4, NAS4, 0, &
 			$FF, $00, $00, $00, $FF
 	PCMINSDAT	HatSample, &
 			HatSample_End-HatSample, HatSample_End-HatSample-$21, &
-			NB4, NB4, -2, &
+			NB4, NB4, NB4, 0, &
 			$FF, $00, $00, $00, $FF
 	PCMINSEND
 

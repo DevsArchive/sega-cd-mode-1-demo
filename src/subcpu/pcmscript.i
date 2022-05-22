@@ -262,7 +262,8 @@ PCMINSPTR macro addr
 ;	loop   - Loop point
 ;	nstart - Note range start
 ;	nend   - Note range end
-;	trns   - Transposition
+;	root   - Root note
+;	detune - Detune
 ;	atk    - Attack rate
 ;	dec    - Decay rate
 ;	slv    - Sustain level
@@ -270,7 +271,7 @@ PCMINSPTR macro addr
 ;	rel    - Release rate
 ; ---------------------------------------------------------------------------
 
-PCMINSDAT macro addr, len, loop, nstart, nend, trns, atk, dec, slv, sus, rel
+PCMINSDAT macro addr, len, loop, nstart, nend, root, detune, atk, dec, slv, sus, rel
 	if ((\nstart)<PCMNSTART)|((\nstart)>PCMNEND)
 		inform 2,"Invalid note range start"
 		mexit
@@ -280,14 +281,18 @@ PCMINSDAT macro addr, len, loop, nstart, nend, trns, atk, dec, slv, sus, rel
 	elseif (\nend)<(\nstart)
 		inform 2,"Note range end is less than start"
 		mexit
+	elseif ((\root)<PCMNSTART)|((\root)>PCMNEND)
+		inform 2,"Invalid root note"
+		mexit
 	endif
 	
 	dc.l	\addr
 	dc.l	\len
 	dc.l	\loop
-	dc.b	\trns
+	dc.l	((NA4-(\root))<<16)+(\detune)
 	dc.b	\atk, \dec, \slv, \sus, \rel
-	dc.b	(\nstart)-PCMNSTART, (\nend)-PCMNSTART
+	dc.b	(\nstart)-NA0, (\nend)-NA0
+	even
 	endm
 
 ; ---------------------------------------------------------------------------
